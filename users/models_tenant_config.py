@@ -85,10 +85,15 @@ class TenantPermission(models.Model):
     """Custom permissions for tenant users"""
     
     PERMISSION_CHOICES = [
+        ('enforce_permissions', 'Enforce Permissions'),
         ('view_products', 'View Products'),
         ('create_products', 'Create Products'),
         ('edit_products', 'Edit Products'),
         ('delete_products', 'Delete Products'),
+        ('view_categories', 'View Categories'),
+        ('create_categories', 'Create Categories'),
+        ('edit_categories', 'Edit Categories'),
+        ('delete_categories', 'Delete Categories'),
         ('view_clients', 'View Clients'),
         ('create_clients', 'Create Clients'),
         ('edit_clients', 'Edit Clients'),
@@ -97,6 +102,17 @@ class TenantPermission(models.Model):
         ('create_sales', 'Create Sales'),
         ('edit_sales', 'Edit Sales'),
         ('delete_sales', 'Delete Sales'),
+        ('view_orders', 'View Orders'),
+        ('edit_orders', 'Edit Orders'),
+        ('delete_orders', 'Delete Orders'),
+        ('view_services', 'View Services'),
+        ('create_services', 'Create Services'),
+        ('edit_services', 'Edit Services'),
+        ('delete_services', 'Delete Services'),
+        ('view_cashbox', 'View Cashbox'),
+        ('edit_cashbox', 'Edit Cashbox'),
+        ('view_web', 'View Web'),
+        ('edit_web', 'Edit Web'),
         ('view_reports', 'View Reports'),
         ('manage_users', 'Manage Users'),
         ('manage_settings', 'Manage Settings'),
@@ -113,3 +129,71 @@ class TenantPermission(models.Model):
     
     class Meta:
         unique_together = ['tenant', 'user', 'permission']
+
+
+class TenantActivityLog(models.Model):
+    tenant = models.ForeignKey('users.Tenant', on_delete=models.CASCADE, related_name='activity_logs')
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs')
+    actor_username = models.CharField(max_length=150, blank=True, default='')
+    actor_role = models.CharField(max_length=30, blank=True, default='')
+
+    action = models.CharField(max_length=40)
+    resource_type = models.CharField(max_length=60, blank=True, default='')
+    resource_id = models.CharField(max_length=64, blank=True, default='')
+    message = models.CharField(max_length=255, blank=True, default='')
+    metadata = models.JSONField(default=dict, blank=True)
+
+    ip_address = models.CharField(max_length=45, blank=True, default='')
+    user_agent = models.CharField(max_length=300, blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', '-created_at']),
+            models.Index(fields=['tenant', 'actor', '-created_at']),
+            models.Index(fields=['tenant', 'action', '-created_at']),
+            models.Index(fields=['tenant', 'resource_type', '-created_at']),
+        ]
+
+    def __str__(self):
+        who = self.actor_username or (self.actor.username if self.actor else 'unknown')
+        return f"{self.tenant_id}:{who}:{self.action}:{self.resource_type}:{self.resource_id}"
+
+
+def _support_audio_path(instance, filename: str) -> str:
+    return f"support_audio/tenant_{instance.tenant_id}/{filename}"
+
+
+class TenantSupportMessage(models.Model):
+    tenant = models.ForeignKey('users.Tenant', on_delete=models.CASCADE, related_name='support_messages')
+    sender = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='support_messages')
+    sender_username = models.CharField(max_length=150, blank=True, default='')
+    sender_role = models.CharField(max_length=30, blank=True, default='')
+
+    text = models.TextField(blank=True, default='')
+    audio = models.FileField(upload_to=_support_audio_path, null=True, blank=True)
+    mime_type = models.CharField(max_length=100, blank=True, default='')
+    duration_ms = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', '-created_at']),
+            models.Index(fields=['tenant', 'sender_role', '-created_at']),
+        ]
+
+
+class TenantSupportChatState(models.Model):
+    tenant = models.ForeignKey('users.Tenant', on_delete=models.CASCADE, related_name='support_chat_states')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='support_chat_states')
+    last_seen_id = models.BigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['tenant', 'user']
+        indexes = [
+            models.Index(fields=['tenant', 'user']),
+            models.Index(fields=['user', '-updated_at']),
+        ]

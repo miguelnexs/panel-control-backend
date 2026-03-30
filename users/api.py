@@ -220,6 +220,17 @@ class MeView(APIView):
                 except:
                     pass
 
+        permissions_enforced = False
+        permissions = []
+        try:
+            if profile and getattr(profile, 'tenant', None):
+                from .models_tenant_config import TenantPermission
+                qs = TenantPermission.objects.filter(tenant=profile.tenant, user=request.user)
+                permissions_enforced = qs.filter(permission='enforce_permissions').exists()
+                permissions = list(qs.exclude(permission='enforce_permissions').values_list('permission', flat=True))
+        except:
+            pass
+
         return Response({
             'id': request.user.id,
             'username': request.user.username,
@@ -231,7 +242,9 @@ class MeView(APIView):
             'department': profile.department if profile else None,
             'position': profile.position if profile else None,
             'subscription': subscription_info,
-            'has_paid': has_paid
+            'has_paid': has_paid,
+            'permissions_enforced': permissions_enforced,
+            'permissions': permissions
         }, status=status.HTTP_200_OK)
 
     def patch(self, request):
@@ -284,6 +297,8 @@ def _serialize_user(user: User):
         'department': department,
         'position': position,
         'phone': phone,
+        'last_login': user.last_login.isoformat() if getattr(user, 'last_login', None) else None,
+        'date_joined': user.date_joined.isoformat() if getattr(user, 'date_joined', None) else None,
     }
 
 # Helper seguro para obtener el rol sin provocar 500 si no hay perfil

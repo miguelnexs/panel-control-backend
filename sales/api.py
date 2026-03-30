@@ -12,6 +12,8 @@ import random
 from django.db.models import Sum, Count
 from django.conf import settings
 from users.models import UserProfile, Tenant
+from users.audit import log_activity
+from users.models_tenant_config import TenantActivityLog
 from clients.models import Client
 from products.models import Product, ProductColor, ProductVariant
 from .models import Sale, SaleItem, OrderNotification
@@ -153,6 +155,28 @@ class SaleView(APIView):
 
         sale.total_amount = total
         sale.save(update_fields=['total_amount'])
+
+        try:
+            items_meta = []
+            for it in data['items']:
+                items_meta.append({
+                    'product_id': it.get('product_id'),
+                    'color_id': it.get('color_id'),
+                    'variant_id': it.get('variant_id'),
+                    'quantity': it.get('quantity'),
+                })
+            log_activity(
+                tenant=tenant,
+                actor=request.user,
+                action='sale.create',
+                resource_type='sale',
+                resource_id=str(sale.id),
+                message=f'Nueva venta {sale.order_number}',
+                metadata={'order_number': sale.order_number, 'total_amount': str(total), 'items': items_meta, 'client_id': client.id if client else None},
+                request=request,
+            )
+        except Exception:
+            pass
 
         # Create OrderNotification for the dashboard
         try:
@@ -298,6 +322,15 @@ class SalesStatsView(APIView):
 
     def get(self, request):
         tenant = _get_user_tenant(request.user)
+        if not tenant:
+            try:
+                role = request.user.profile.role
+            except Exception:
+                role = 'employee'
+            if role == 'super_admin':
+                tid = request.query_params.get('tenant_id')
+                if tid:
+                    tenant = Tenant.objects.filter(id=tid).first()
         qs = Sale.objects.all()
         if tenant:
             qs = qs.filter(tenant=tenant)
@@ -309,12 +342,12 @@ class SalesStatsView(APIView):
         today_sales = qs.filter(created_at__gte=day_start).count()
         month_sales = qs.filter(created_at__gte=month_start).count()
         
-        # Daily sales for chart (last 7 days)
+        # Daily sales for chart (last 14 days)
         daily_sales = []
         daily_amounts = []
         daily_labels = []
         days_map = {'Mon': 'Lun', 'Tue': 'Mar', 'Wed': 'Mié', 'Thu': 'Jue', 'Fri': 'Vie', 'Sat': 'Sáb', 'Sun': 'Dom'}
-        for i in range(6, -1, -1):
+        for i in range(13, -1, -1):
             d = now - timezone.timedelta(days=i)
             start = d.replace(hour=0, minute=0, second=0, microsecond=0)
             end = d.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -324,18 +357,89 @@ class SalesStatsView(APIView):
             amount = sub_qs.aggregate(s=Sum('total_amount')).get('s') or 0
             daily_amounts.append(float(amount))
             en_day = d.strftime('%a')
-            daily_labels.append(days_map.get(en_day, en_day))
+            daily_labels.append(f"{days_map.get(en_day, en_day)} {d.day}")
+
+        # Trend: last 7 days vs previous 7 days
+        last7_start = (now - timezone.timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+        prev7_start = (now - timezone.timedelta(days=13)).replace(hour=0, minute=0, second=0, microsecond=0)
+        prev7_end = (now - timezone.timedelta(days=7)).replace(hour=23, minute=59, second=59, microsecond=999999)
+        last7_qs = qs.filter(created_at__gte=last7_start)
+        prev7_qs = qs.filter(created_at__range=(prev7_start, prev7_end))
+        last7_count = last7_qs.count()
+        prev7_count = prev7_qs.count()
+        last7_amount = last7_qs.aggregate(s=Sum('total_amount')).get('s') or Decimal('0.00')
+        prev7_amount = prev7_qs.aggregate(s=Sum('total_amount')).get('s') or Decimal('0.00')
+        sales_trend_pct = None
+        amount_trend_pct = None
+        try:
+            if prev7_count > 0:
+                sales_trend_pct = float((last7_count - prev7_count) / prev7_count * 100)
+            else:
+                sales_trend_pct = 100.0 if last7_count > 0 else 0.0
+        except Exception:
+            sales_trend_pct = None
+        try:
+            prev7_amount_f = float(prev7_amount)
+            last7_amount_f = float(last7_amount)
+            if prev7_amount_f > 0:
+                amount_trend_pct = float((last7_amount_f - prev7_amount_f) / prev7_amount_f * 100)
+            else:
+                amount_trend_pct = 100.0 if last7_amount_f > 0 else 0.0
+        except Exception:
+            amount_trend_pct = None
 
         # Top products
         top_products = []
-        top_qs = SaleItem.objects.filter(sale__tenant=tenant) if tenant else SaleItem.objects.all()
-        top_qs = top_qs.values('product_name').annotate(qty=Sum('quantity'), amount=Sum('line_total')).order_by('-qty')[:5]
-        for tp in top_qs:
-            top_products.append({
-                'name': tp['product_name'] or 'Producto desconocido',
-                'qty': tp['qty'],
-                'amount': str(tp['amount'])
-            })
+        best_product = None
+        if tenant:
+            top_qs = (
+                SaleItem.objects.filter(sale__tenant=tenant, product__isnull=False)
+                .values('product_id', 'product__name', 'product__image')
+                .annotate(qty=Sum('quantity'), amount=Sum('line_total'))
+                .order_by('-qty')[:10]
+            )
+            for tp in top_qs:
+                row = {
+                    'product_id': tp['product_id'],
+                    'name': tp['product__name'] or 'Producto',
+                    'image': str(tp['product__image'] or ''),
+                    'qty': int(tp['qty'] or 0),
+                    'amount': str(tp['amount'] or '0'),
+                }
+                top_products.append(row)
+            if top_products:
+                best_product = top_products[0]
+            # Include deleted products (no FK) grouped by snapshot name
+            orphan_qs = (
+                SaleItem.objects.filter(sale__tenant=tenant, product__isnull=True)
+                .values('product_name')
+                .annotate(qty=Sum('quantity'), amount=Sum('line_total'))
+                .order_by('-qty')[:5]
+            )
+            for tp in orphan_qs:
+                top_products.append({
+                    'product_id': None,
+                    'name': tp['product_name'] or 'Producto desconocido',
+                    'image': '',
+                    'qty': int(tp['qty'] or 0),
+                    'amount': str(tp['amount'] or '0'),
+                })
+
+        # Top seller (by audit logs)
+        top_seller = None
+        if tenant:
+            try:
+                seller = (
+                    TenantActivityLog.objects.filter(tenant=tenant, action='sale.create').exclude(actor_role__in=['admin', 'super_admin', ''])
+                    .values('actor_username')
+                    .annotate(c=Count('id'))
+                    .order_by('-c')
+                    .first()
+                )
+                if seller and seller.get('actor_username'):
+                    top_seller = {'username': seller['actor_username'], 'sales': int(seller['c'] or 0)}
+            except Exception:
+                top_seller = None
 
         status_counts = {
             'pending': qs.filter(status='pending').count(),
@@ -348,11 +452,21 @@ class SalesStatsView(APIView):
             'total_amount': str(total_amount),
             'today_sales': today_sales,
             'month_sales': month_sales,
+            'trend': {
+                'last7_sales': last7_count,
+                'prev7_sales': prev7_count,
+                'sales_pct': sales_trend_pct,
+                'last7_amount': str(last7_amount),
+                'prev7_amount': str(prev7_amount),
+                'amount_pct': amount_trend_pct,
+            },
             'status_counts': status_counts,
             'chart_data': daily_sales,
             'chart_amounts': daily_amounts,
             'chart_labels': daily_labels,
             'top_products': top_products,
+            'best_product': best_product,
+            'top_seller': top_seller,
         })
 
 

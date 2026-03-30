@@ -3,6 +3,8 @@ from rest_framework.routers import DefaultRouter
 from . import views
 from . import api as api_views
 from . import api_tenant_config as tenant_api_views
+from . import api_audit as audit_api_views
+from . import api_support as support_api_views
 from . import views_tenant as tenant_views
 from .api_subscription import SubscriptionPlanViewSet, TenantPlanViewSet
 from . import api_stripe
@@ -65,6 +67,12 @@ urlpatterns = [
     path('api/tenant/themes/<int:theme_id>/', tenant_api_views.TenantThemeDetailView.as_view(), name='api_tenant_theme_detail'),
     path('api/tenant/permissions/', tenant_api_views.TenantPermissionsView.as_view(), name='api_tenant_permissions'),
     path('api/tenant/permissions/<int:permission_id>/', tenant_api_views.TenantPermissionDetailView.as_view(), name='api_tenant_permission_detail'),
+    path('api/tenant/permissions/matrix/', tenant_api_views.TenantPermissionsMatrixView.as_view(), name='api_tenant_permissions_matrix'),
+    path('api/tenant/activities/', audit_api_views.TenantActivitiesView.as_view(), name='api_tenant_activities'),
+    path('api/support/messages/', support_api_views.TenantSupportMessagesView.as_view(), name='api_support_messages'),
+    path('api/support/unread/', support_api_views.TenantSupportUnreadView.as_view(), name='api_support_unread'),
+    path('api/support/chats/', support_api_views.TenantSupportChatsView.as_view(), name='api_support_chats'),
+    path('api/support/mark_read/', support_api_views.TenantSupportMarkReadView.as_view(), name='api_support_mark_read'),
     
     # Super admin tenant management
     path('api/admin/tenants/', tenant_api_views.SuperAdminTenantsView.as_view(), name='api_admin_tenants'),

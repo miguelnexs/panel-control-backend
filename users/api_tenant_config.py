@@ -6,6 +6,7 @@ from django.shortcuts import get_object_or_404
 from .models_tenant_config import TenantConfiguration, TenantTheme, TenantPermission
 from .models import Tenant, UserProfile
 from .tenant import get_current_tenant_alias, ensure_tenant_for_user
+from .audit import log_activity
 
 
 class TenantConfigurationSerializer(serializers.ModelSerializer):
@@ -211,6 +212,106 @@ class TenantPermissionDetailView(APIView):
             permission.delete()
             return Response(status=status.HTTP_204_NO_CONTENT)
             
+        except UserProfile.DoesNotExist:
+            return Response({'detail': 'User profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+class TenantPermissionsMatrixView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            ensure_tenant_for_user(request.user)
+            profile = request.user.profile
+            if profile.role not in ('admin', 'super_admin'):
+                return Response({'detail': 'Solo administradores pueden gestionar permisos.'}, status=status.HTTP_403_FORBIDDEN)
+            tenant = profile.tenant
+            if not tenant and profile.role == 'super_admin':
+                tenant_id = request.query_params.get('tenant_id')
+                if tenant_id:
+                    tenant = Tenant.objects.filter(id=tenant_id).first()
+            if not tenant:
+                return Response({'detail': 'No tenant associated with user'}, status=status.HTTP_404_NOT_FOUND)
+
+            employees = UserProfile.objects.filter(tenant=tenant, role='employee', user__is_active=True).select_related('user')
+            perms = TenantPermission.objects.filter(tenant=tenant, user__in=[e.user for e in employees]).values('user_id', 'permission')
+            perms_by_user = {}
+            for p in perms:
+                perms_by_user.setdefault(p['user_id'], []).append(p['permission'])
+
+            data = []
+            for e in employees:
+                raw = perms_by_user.get(e.user_id, [])
+                enforced = 'enforce_permissions' in raw
+                filtered = [x for x in raw if x != 'enforce_permissions']
+                data.append({
+                    'id': e.user_id,
+                    'username': e.user.username,
+                    'first_name': e.user.first_name,
+                    'last_name': e.user.last_name,
+                    'email': e.user.email,
+                    'department': getattr(e, 'department', None),
+                    'position': getattr(e, 'position', None),
+                    'enforced': enforced,
+                    'permissions': filtered,
+                })
+            return Response(data)
+        except UserProfile.DoesNotExist:
+            return Response({'detail': 'User profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    def patch(self, request):
+        try:
+            ensure_tenant_for_user(request.user)
+            profile = request.user.profile
+            if profile.role not in ('admin', 'super_admin'):
+                return Response({'detail': 'Solo administradores pueden gestionar permisos.'}, status=status.HTTP_403_FORBIDDEN)
+            tenant = profile.tenant
+            if not tenant and profile.role == 'super_admin':
+                tenant_id = request.data.get('tenant_id')
+                if tenant_id:
+                    tenant = Tenant.objects.filter(id=tenant_id).first()
+            if not tenant:
+                return Response({'detail': 'No tenant associated with user'}, status=status.HTTP_404_NOT_FOUND)
+
+            user_id = request.data.get('user_id')
+            enforced = request.data.get('enforced', True)
+            permissions = request.data.get('permissions', [])
+            if not user_id:
+                return Response({'detail': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+            if permissions is None:
+                permissions = []
+            if not isinstance(permissions, list):
+                return Response({'detail': 'permissions must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                target_profile = UserProfile.objects.get(user_id=user_id, tenant=tenant, role='employee')
+            except UserProfile.DoesNotExist:
+                return Response({'detail': 'User not found in this tenant'}, status=status.HTTP_404_NOT_FOUND)
+
+            allowed = {c[0] for c in TenantPermission.PERMISSION_CHOICES}
+            clean = [p for p in permissions if isinstance(p, str) and p in allowed and p != 'enforce_permissions']
+
+            TenantPermission.objects.filter(tenant=tenant, user=target_profile.user).delete()
+            if enforced:
+                TenantPermission.objects.create(tenant=tenant, user=target_profile.user, permission='enforce_permissions', granted_by=request.user)
+                for p in clean:
+                    TenantPermission.objects.create(tenant=tenant, user=target_profile.user, permission=p, granted_by=request.user)
+
+            try:
+                log_activity(
+                    tenant=tenant,
+                    actor=request.user,
+                    action='permissions.update',
+                    resource_type='user',
+                    resource_id=str(target_profile.user_id),
+                    message=f'Permisos actualizados para {target_profile.user.username}',
+                    metadata={'enforced': bool(enforced), 'permissions': clean},
+                    request=request,
+                )
+            except Exception:
+                pass
+
+            return Response({'user_id': target_profile.user_id, 'enforced': bool(enforced), 'permissions': clean})
         except UserProfile.DoesNotExist:
             return Response({'detail': 'User profile not found'}, status=status.HTTP_404_NOT_FOUND)
 

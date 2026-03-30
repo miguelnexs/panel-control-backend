@@ -11,6 +11,7 @@ from django.contrib.auth.models import User
 from .models import Service, ServiceCategory, ServiceDefinition
 from clients.models import Client
 from users.models import UserProfile, Tenant
+from users.audit import log_activity
 from sales.models import Sale, SaleItem
 import random
 from decimal import Decimal
@@ -243,7 +244,17 @@ class ServiceListCreateView(ListCreateAPIView):
         if not tenant and role != 'super_admin':
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('No tiene tenant asignado. Contacte al administrador.')
-        serializer.save(tenant=tenant if tenant else None)
+        service = serializer.save(tenant=tenant if tenant else None)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service.create',
+            resource_type='service',
+            resource_id=str(service.id),
+            message=f'Servicio creado: {service.name}',
+            metadata={'name': service.name, 'status': getattr(service, 'status', None), 'value': str(getattr(service, 'value', ''))},
+            request=self.request,
+        )
 
 
 class ServiceDetailView(RetrieveUpdateDestroyAPIView):
@@ -268,7 +279,32 @@ class ServiceDetailView(RetrieveUpdateDestroyAPIView):
         role = _get_user_role(self.request.user)
         if role not in ('admin', 'super_admin'):
             raise PermissionDenied('Solo administradores pueden eliminar servicios.')
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service.delete',
+            resource_type='service',
+            resource_id=str(instance.id),
+            message=f'Servicio eliminado: {instance.name}',
+            metadata={'name': instance.name, 'status': getattr(instance, 'status', None)},
+            request=self.request,
+        )
         instance.delete()
+
+    def perform_update(self, serializer):
+        service = serializer.save()
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service.update',
+            resource_type='service',
+            resource_id=str(service.id),
+            message=f'Servicio actualizado: {service.name}',
+            metadata={'name': service.name, 'status': getattr(service, 'status', None), 'value': str(getattr(service, 'value', ''))},
+            request=self.request,
+        )
 
 
 class ServiceCategoryPagination(PageNumberPagination):
@@ -307,7 +343,17 @@ class ServiceCategoryListCreateView(ListCreateAPIView):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Solo administradores pueden crear categorías de servicios.')
         tenant = _get_user_tenant(self.request.user)
-        serializer.save(tenant=tenant if tenant else None)
+        cat = serializer.save(tenant=tenant if tenant else None)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service_category.create',
+            resource_type='service_category',
+            resource_id=str(cat.id),
+            message=f'Categoría de servicio creada: {cat.name}',
+            metadata={'name': cat.name, 'active': bool(getattr(cat, 'active', True))},
+            request=self.request,
+        )
 
 
 class ServiceCategoryDetailView(RetrieveUpdateDestroyAPIView):
@@ -328,13 +374,57 @@ class ServiceCategoryDetailView(RetrieveUpdateDestroyAPIView):
         if role not in ('admin', 'super_admin'):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Solo administradores pueden editar categorías de servicios.')
-        serializer.save()
+        cat = serializer.save()
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service_category.update',
+            resource_type='service_category',
+            resource_id=str(cat.id),
+            message=f'Categoría de servicio actualizada: {cat.name}',
+            metadata={'name': cat.name, 'active': bool(getattr(cat, 'active', True))},
+            request=self.request,
+        )
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service_definition.update',
+            resource_type='service_definition',
+            resource_id=str(svc.id),
+            message=f'Servicio de catálogo actualizado: {svc.name}',
+            metadata={'name': svc.name, 'price': str(getattr(svc, 'price', ''))},
+            request=self.request,
+        )
 
     def perform_destroy(self, instance):
         role = _get_user_role(self.request.user)
         if role not in ('admin', 'super_admin'):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Solo administradores pueden eliminar categorías de servicios.')
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service_category.delete',
+            resource_type='service_category',
+            resource_id=str(instance.id),
+            message=f'Categoría de servicio eliminada: {instance.name}',
+            metadata={'name': instance.name},
+            request=self.request,
+        )
+        instance.delete()
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service_definition.delete',
+            resource_type='service_definition',
+            resource_id=str(instance.id),
+            message=f'Servicio de catálogo eliminado: {instance.name}',
+            metadata={'name': instance.name},
+            request=self.request,
+        )
         instance.delete()
 
 
@@ -374,7 +464,17 @@ class ServiceDefinitionListCreateView(ListCreateAPIView):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Solo administradores pueden crear servicios en el catálogo.')
         tenant = _get_user_tenant(self.request.user)
-        serializer.save(tenant=tenant if tenant else None)
+        svc = serializer.save(tenant=tenant if tenant else None)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='service_definition.create',
+            resource_type='service_definition',
+            resource_id=str(svc.id),
+            message=f'Servicio de catálogo creado: {svc.name}',
+            metadata={'name': svc.name, 'price': str(getattr(svc, 'price', ''))},
+            request=self.request,
+        )
 
 
 class ServiceDefinitionDetailView(RetrieveUpdateDestroyAPIView):

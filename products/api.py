@@ -4,6 +4,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
 from .models import Product, ProductImage
 from users.models import UserProfile, Tenant
+from users.audit import log_activity
 from .models import Category
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q, Sum
@@ -261,7 +262,17 @@ class ProductListCreateView(ListCreateAPIView):
                     from rest_framework.exceptions import PermissionDenied
                     raise PermissionDenied(f'Límite de productos alcanzado ({plan.max_products}). Actualice su plan.')
 
-        serializer.save(tenant=tenant)
+        product = serializer.save(tenant=tenant)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='product.create',
+            resource_type='product',
+            resource_id=str(product.id),
+            message=f'Producto creado: {product.name}',
+            metadata={'name': product.name, 'sku': product.sku, 'price': str(product.price)},
+            request=self.request,
+        )
 
 
 class ProductDetailView(RetrieveUpdateDestroyAPIView):
@@ -278,11 +289,36 @@ class ProductDetailView(RetrieveUpdateDestroyAPIView):
             return Product.objects.all()
         return Product.objects.none()
 
+    def perform_update(self, serializer):
+        product = serializer.save()
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='product.update',
+            resource_type='product',
+            resource_id=str(product.id),
+            message=f'Producto actualizado: {product.name}',
+            metadata={'name': product.name, 'sku': product.sku, 'price': str(product.price), 'active': bool(product.active)},
+            request=self.request,
+        )
+
     def perform_destroy(self, instance):
         from rest_framework.exceptions import PermissionDenied
         role = _get_user_role(self.request.user)
         if role not in ('admin', 'super_admin'):
             raise PermissionDenied('Solo administradores pueden eliminar productos.')
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='product.delete',
+            resource_type='product',
+            resource_id=str(instance.id),
+            message=f'Producto eliminado: {instance.name}',
+            metadata={'name': instance.name, 'sku': instance.sku},
+            request=self.request,
+        )
         instance.delete()
 
 
@@ -358,6 +394,34 @@ class CategoryListCreateView(ListCreateAPIView):
         else:
             qs = qs.order_by('-created_at')
         return qs
+
+    def perform_create(self, serializer):
+        from rest_framework.exceptions import PermissionDenied
+        role = _get_user_role(self.request.user)
+        if role not in ('admin', 'super_admin'):
+            raise PermissionDenied('Solo administradores pueden crear categorías.')
+        tenant = _get_user_tenant(self.request.user)
+        if not tenant and role != 'super_admin':
+            raise PermissionDenied('No tiene tenant asignado. Contacte al administrador.')
+
+        if tenant and tenant.subscription_plan:
+            plan = tenant.subscription_plan
+            if plan.max_categories != -1:
+                count = Category.objects.filter(tenant=tenant).count()
+                if count >= plan.max_categories:
+                    raise PermissionDenied(f'Límite de categorías alcanzado ({plan.max_categories}). Actualice su plan.')
+
+        category = serializer.save(tenant=tenant if tenant else None)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='category.create',
+            resource_type='category',
+            resource_id=str(category.id),
+            message=f'Categoría creada: {category.name}',
+            metadata={'name': category.name, 'active': bool(category.active)},
+            request=self.request,
+        )
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -448,27 +512,6 @@ class ProductImageDetailView(RetrieveUpdateDestroyAPIView):
                 qs = ProductImage.objects.none()
         return qs
 
-    def perform_create(self, serializer):
-        role = _get_user_role(self.request.user)
-        if role not in ('admin', 'super_admin'):
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('Solo administradores pueden crear categorías.')
-        tenant = _get_user_tenant(self.request.user)
-        if not tenant and role != 'super_admin':
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied('No tiene tenant asignado. Contacte al administrador.')
-        
-        # Check plan limits
-        if tenant and tenant.subscription_plan:
-            plan = tenant.subscription_plan
-            if plan.max_categories != -1:
-                count = Category.objects.filter(tenant=tenant).count()
-                if count >= plan.max_categories:
-                    from rest_framework.exceptions import PermissionDenied
-                    raise PermissionDenied(f'Límite de categorías alcanzado ({plan.max_categories}). Actualice su plan.')
-
-        serializer.save(tenant=tenant if tenant else None)
-
 
 class CategoryDetailView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
@@ -489,13 +532,35 @@ class CategoryDetailView(RetrieveUpdateDestroyAPIView):
         if role not in ('admin', 'super_admin'):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Solo administradores pueden editar categorías.')
-        serializer.save()
+        category = serializer.save()
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='category.update',
+            resource_type='category',
+            resource_id=str(category.id),
+            message=f'Categoría actualizada: {category.name}',
+            metadata={'name': category.name, 'active': bool(category.active)},
+            request=self.request,
+        )
 
     def perform_destroy(self, instance):
         role = _get_user_role(self.request.user)
         if role not in ('admin', 'super_admin'):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Solo administradores pueden eliminar categorías.')
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='category.delete',
+            resource_type='category',
+            resource_id=str(instance.id),
+            message=f'Categoría eliminada: {instance.name}',
+            metadata={'name': instance.name},
+            request=self.request,
+        )
         instance.delete()
 
 
@@ -548,7 +613,38 @@ class ProductColorListCreateView(ListCreateAPIView):
         if tenant and product.tenant != tenant:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('No puede modificar colores de otro tenant.')
-        serializer.save(product=product)
+        color = serializer.save(product=product)
+        try:
+            # Crear combinaciones SKU para este color
+            variants = list(ProductVariant.objects.filter(product=product).only('id'))
+            if variants:
+                for v in variants:
+                    ProductSKU.objects.get_or_create(
+                        product=product,
+                        color=color,
+                        variant=v,
+                        defaults={'sku': '', 'stock': 0, 'active': True}
+                    )
+            else:
+                ProductSKU.objects.get_or_create(
+                    product=product,
+                    color=color,
+                    variant=None,
+                    defaults={'sku': '', 'stock': 0, 'active': True}
+                )
+        except Exception:
+            # Si hay algún problema (únicos/DB), lo ignoramos para no bloquear la creación del color
+            pass
+        log_activity(
+            tenant=_get_user_tenant(self.request.user),
+            actor=self.request.user,
+            action='product.color.create',
+            resource_type='product_color',
+            resource_id=str(color.id),
+            message=f'Color agregado: {color.name}',
+            metadata={'product_id': product.id, 'color': color.name},
+            request=self.request,
+        )
 
 
 class ProductColorDetailView(RetrieveUpdateDestroyAPIView):
@@ -681,7 +777,38 @@ class ProductVariantListCreateView(ListCreateAPIView):
         if tenant and product.tenant != tenant:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('No puede modificar variantes de otro tenant.')
-        serializer.save(product=product)
+        variant = serializer.save(product=product)
+        try:
+            # Crear combinaciones SKU para esta variante
+            colors = list(ProductColor.objects.filter(product=product).only('id'))
+            if colors:
+                for c in colors:
+                    ProductSKU.objects.get_or_create(
+                        product=product,
+                        color=c,
+                        variant=variant,
+                        defaults={'sku': '', 'stock': 0, 'active': True}
+                    )
+            else:
+                ProductSKU.objects.get_or_create(
+                    product=product,
+                    color=None,
+                    variant=variant,
+                    defaults={'sku': '', 'stock': 0, 'active': True}
+                )
+        except Exception:
+            # No bloquear en caso de error de DB/duplicados
+            pass
+        log_activity(
+            tenant=_get_user_tenant(self.request.user),
+            actor=self.request.user,
+            action='product.variant.create',
+            resource_type='product_variant',
+            resource_id=str(variant.id),
+            message=f'Variante agregada: {variant.name}',
+            metadata={'product_id': product.id, 'variant': variant.name},
+            request=self.request,
+        )
 
 
 class ProductVariantDetailView(RetrieveUpdateDestroyAPIView):

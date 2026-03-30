@@ -10,6 +10,7 @@ from django.utils import timezone
 from .models import Client
 from sales.models import Sale, SaleItem
 from users.models import UserProfile, Tenant
+from users.audit import log_activity
 
 
 class ClientSerializer(serializers.ModelSerializer):
@@ -83,7 +84,17 @@ class ClientsListCreateView(ListCreateAPIView):
 
     def perform_create(self, serializer):
         tenant = _get_user_tenant(self.request.user)
-        serializer.save(tenant=tenant)
+        client = serializer.save(tenant=tenant)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='client.create',
+            resource_type='client',
+            resource_id=str(client.id),
+            message=f'Cliente creado: {client.full_name}',
+            metadata={'full_name': client.full_name, 'client_type': client.client_type},
+            request=self.request,
+        )
 
 
 class ClientsDetailView(RetrieveUpdateDestroyAPIView):
@@ -96,6 +107,34 @@ class ClientsDetailView(RetrieveUpdateDestroyAPIView):
         if tenant:
             return Client.objects.filter(tenant=tenant)
         return Client.objects.all()
+
+    def perform_update(self, serializer):
+        client = serializer.save()
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='client.update',
+            resource_type='client',
+            resource_id=str(client.id),
+            message=f'Cliente actualizado: {client.full_name}',
+            metadata={'full_name': client.full_name, 'client_type': client.client_type},
+            request=self.request,
+        )
+
+    def perform_destroy(self, instance):
+        tenant = _get_user_tenant(self.request.user)
+        log_activity(
+            tenant=tenant,
+            actor=self.request.user,
+            action='client.delete',
+            resource_type='client',
+            resource_id=str(instance.id),
+            message=f'Cliente eliminado: {instance.full_name}',
+            metadata={'full_name': instance.full_name, 'client_type': instance.client_type},
+            request=self.request,
+        )
+        instance.delete()
 
 
 class ClientsStatsView(APIView):

@@ -3,9 +3,10 @@ import sys
 import django
 
 # Asegurar que el directorio raíz del proyecto esté en sys.path
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# En Docker, el proyecto se monta en /app
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 PROJECT_DIR = os.path.join(BASE_DIR, 'globetrek_backend')
-for p in (PROJECT_DIR, BASE_DIR):
+for p in (BASE_DIR, PROJECT_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -18,7 +19,7 @@ from users.models import UserProfile
 
 def main():
     username = os.environ.get('SUPERADMIN_USERNAME', 'superadmin')
-    password = os.environ.get('SUPERADMIN_PASSWORD', 'SuperAdmin#2025!')
+    password = os.environ.get('SUPERADMIN_PASSWORD')  # no default password
     email = os.environ.get('SUPERADMIN_EMAIL', 'superadmin@example.com')
 
     user, created = User.objects.get_or_create(
@@ -34,7 +35,9 @@ def main():
     user.email = email
     user.is_staff = True
     user.is_superuser = True
-    user.set_password(password)
+    # Solo establecer/rotar contraseña si viene por entorno o el usuario fue creado
+    if password or created:
+        user.set_password(password or User.objects.make_random_password(length=16))
     user.save()
 
     # Vincular perfil con rol de super administrador
