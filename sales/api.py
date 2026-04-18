@@ -41,6 +41,12 @@ class SaleCreateSerializer(serializers.Serializer):
     client_email = serializers.EmailField(required=False)
     client_phone = serializers.CharField(required=False, allow_blank=True)
     client_address = serializers.CharField(required=False)
+    payment_method = serializers.ChoiceField(choices=['cash', 'transfer', 'mixed'], required=False, default='cash')
+    cash_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal('0.00'))
+    transfer_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal('0.00'))
+    change_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal('0.00'))
+    status = serializers.ChoiceField(choices=['pending', 'apartado', 'processing', 'shipped', 'delivered', 'canceled'], required=False, default='pending')
+    apartado_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal('0.00'))
     items = SaleItemInputSerializer(many=True)
 
     def validate(self, attrs):
@@ -95,6 +101,12 @@ class SaleView(APIView):
             )
 
         total = Decimal('0.00')
+        payment_method = data.get('payment_method') or 'cash'
+        status = data.get('status') or 'pending'
+        cash_amount_in = Decimal(str(data.get('cash_amount') or '0'))
+        transfer_amount_in = Decimal(str(data.get('transfer_amount') or '0'))
+        change_amount_in = Decimal(str(data.get('change_amount') or '0'))
+        apartado_amount_in = Decimal(str(data.get('apartado_amount') or '0'))
         # Generate unique order number
         base = timezone.now().strftime('%Y%m%d%H%M%S')
         suffix = f"{random.randint(1000, 9999)}"
@@ -102,7 +114,19 @@ class SaleView(APIView):
         while Sale.objects.filter(order_number=order_number).exists():
             suffix = f"{random.randint(1000, 9999)}"
             order_number = f"ORD-{base}-{suffix}"
-        sale = Sale.objects.create(client=client, tenant=tenant, total_amount=total, order_number=order_number)
+        sale = Sale.objects.create(
+            client=client,
+            tenant=tenant,
+            total_amount=total,
+            order_number=order_number,
+            status=status,
+            payment_method=payment_method,
+            cash_amount=Decimal('0.00'),
+            transfer_amount=Decimal('0.00'),
+            change_amount=Decimal('0.00'),
+            apartado_amount=Decimal('0.00'),
+            apartado_date=timezone.now() if status == 'apartado' else None,
+        )
 
         for it in data['items']:
             product = Product.objects.filter(id=it['product_id']).first()
@@ -111,7 +135,10 @@ class SaleView(APIView):
             qty = int(it['quantity'])
             if qty <= 0:
                 return Response({'detail': 'Cantidad inválida'}, status=400)
-            unit_price = Decimal(str(product.price))
+            if product.sale_price is not None and product.sale_price > 0:
+                unit_price = Decimal(str(product.sale_price))
+            else:
+                unit_price = Decimal(str(product.price))
             variant = None
             color = None
             if it.get('color_id'):
@@ -153,8 +180,37 @@ class SaleView(APIView):
                 product.inventory_qty = int(product.inventory_qty or 0) - qty
                 product.save(update_fields=['inventory_qty'])
 
+        total = total.quantize(Decimal('0.01'))
+        expected_total = apartado_amount_in if status == 'apartado' else total
+
+        if payment_method == 'cash':
+            # For cash, we store the amount applied to the sale (equal to expected_total) and change separately.
+            if cash_amount_in < expected_total:
+                return Response({'detail': 'Pago en efectivo insuficiente'}, status=400)
+            cash_final = expected_total
+            transfer_final = Decimal('0.00')
+            change_final = max(Decimal('0.00'), change_amount_in)
+        elif payment_method == 'transfer':
+            cash_final = Decimal('0.00')
+            transfer_final = expected_total
+            change_final = Decimal('0.00')
+        else:
+            # Mixed: if transfer is omitted, infer from expected_total.
+            transfer_candidate = transfer_amount_in if transfer_amount_in > 0 else (expected_total - cash_amount_in)
+            if cash_amount_in <= 0 or transfer_candidate <= 0:
+                return Response({'detail': 'Pago mixto inválido: debe incluir efectivo y transferencia'}, status=400)
+            if (cash_amount_in + transfer_candidate).quantize(Decimal('0.01')) != expected_total:
+                return Response({'detail': 'Pago mixto inválido: efectivo + transferencia debe ser igual al monto a pagar'}, status=400)
+            cash_final = cash_amount_in.quantize(Decimal('0.01'))
+            transfer_final = transfer_candidate.quantize(Decimal('0.01'))
+            change_final = max(Decimal('0.00'), change_amount_in)
+
         sale.total_amount = total
-        sale.save(update_fields=['total_amount'])
+        sale.cash_amount = cash_final
+        sale.transfer_amount = transfer_final
+        sale.change_amount = change_final
+        sale.apartado_amount = apartado_amount_in if status == 'apartado' else Decimal('0.00')
+        sale.save(update_fields=['total_amount', 'cash_amount', 'transfer_amount', 'change_amount', 'apartado_amount', 'apartado_date'])
 
         try:
             items_meta = []
@@ -214,6 +270,10 @@ class SaleView(APIView):
                 'cedula': client.cedula
             },
             'total_amount': str(sale.total_amount),
+            'payment_method': sale.payment_method,
+            'cash_amount': str(sale.cash_amount),
+            'transfer_amount': str(sale.transfer_amount),
+            'change_amount': str(sale.change_amount),
             'created_at': sale.created_at.isoformat(),
             'order_number': sale.order_number,
             'items': items_out,
@@ -268,6 +328,9 @@ class SalesListView(ListAPIView):
                         'category_name': (getattr(p.category, 'name', None) if p else None),
                         'image': (abs_url(getattr(p, 'image', None) and p.image.url) if p and getattr(p, 'image', None) else None),
                         'active': (p.active if p else False),
+                        'price': str(p.price) if p else '0',
+                        'is_sale': p.is_sale if p else False,
+                        'sale_price': str(p.sale_price) if p and p.sale_price else None,
                     },
                     'color': ({
                         'id': c.id,
@@ -308,6 +371,12 @@ class SalesListView(ListAPIView):
                     'cedula': sale.client.cedula
                 },
                 'total_amount': str(sale.total_amount),
+                'payment_method': sale.payment_method,
+                'cash_amount': str(sale.cash_amount),
+                'transfer_amount': str(sale.transfer_amount),
+                'change_amount': str(sale.change_amount),
+                'apartado_amount': str(sale.apartado_amount),
+                'apartado_date': sale.apartado_date.isoformat() if sale.apartado_date else None,
                 'created_at': sale.created_at.isoformat(),
                 'items_count': sale.items.count(),
                 'items': items_out,

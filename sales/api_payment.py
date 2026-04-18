@@ -158,11 +158,17 @@ class PublicSalePaymentView(APIView):
                 tenant=tenant,
                 client=client_obj,
                 status='pending',
-                total_amount=Decimal(str(total_amount)),
-                order_number=order_number
+                total_amount=Decimal('0.00'),
+                order_number=order_number,
+                payment_method='transfer',
+                cash_amount=Decimal('0.00'),
+                transfer_amount=Decimal('0.00'),
+                change_amount=Decimal('0.00'),
             )
 
             deducted_items = []
+            payment_items = []
+            order_total = Decimal('0.00')
             try:
                 for item in items_data:
                     p_id = item.get('id')
@@ -199,6 +205,16 @@ class PublicSalePaymentView(APIView):
                         product.save(update_fields=['inventory_qty'])
                         deducted_items.append({'type': 'product', 'obj': product, 'qty': qty})
 
+                    price = Decimal(str(product.sale_price)) if (product.sale_price is not None and product.sale_price > 0) else Decimal(str(product.price))
+                    if variant:
+                        try:
+                            price += Decimal(str(variant.extra_price))
+                        except Exception:
+                            pass
+
+                    line_total = price * qty
+                    order_total += line_total
+
                     SaleItem.objects.create(
                         sale=sale,
                         product=product,
@@ -207,9 +223,10 @@ class PublicSalePaymentView(APIView):
                         product_name=product.name,
                         product_sku=product.sku or '',
                         quantity=qty,
-                        unit_price=Decimal(str(item.get('price', 0))),
-                        line_total=Decimal(str(item.get('price', 0) * qty))
+                        unit_price=price,
+                        line_total=line_total
                     )
+                    payment_items.append({'title': item.get('name') or product.name, 'quantity': qty, 'unit_price': float(price)})
             except Exception as e:
                 # Restore stock if something failed during creation
                 for di in deducted_items:
@@ -223,11 +240,15 @@ class PublicSalePaymentView(APIView):
                 sale.save()
                 return Response({'detail': str(e)}, status=400)
 
+            sale.total_amount = order_total
+            sale.transfer_amount = order_total
+            sale.save(update_fields=['total_amount', 'transfer_amount'])
+
             # 5. Procesar Pago
             sdk = mercadopago.SDK(access_token)
 
             payment_body = {
-                "transaction_amount": total_amount,
+                "transaction_amount": float(order_total),
                 "token": mp_payment_data.get("token"),
                 "description": f"Orden {sale.order_number}",
                 "installments": int(mp_payment_data.get("installments", 1)),
@@ -250,7 +271,7 @@ class PublicSalePaymentView(APIView):
             
             payment_body["additional_info"] = {
                 "ip_address": ip,
-                "items": [{"title": i.get('name'), "quantity": i.get('quantity'), "unit_price": float(i.get('price'))} for i in items_data]
+                "items": payment_items
             }
 
             payment_response = sdk.payment().create(payment_body)

@@ -1014,7 +1014,10 @@ class PublicCheckoutView(views.APIView):
                         raise ValueError('Producto no existe')
                     if tenant and getattr(product, 'tenant_id', None) != getattr(tenant, 'id', None):
                         raise ValueError('Producto no pertenece a la tienda')
-                    price = Decimal(str(product.price))
+                    if product.sale_price is not None and product.sale_price > 0:
+                        price = Decimal(str(product.sale_price))
+                    else:
+                        price = Decimal(str(product.price))
                     variant = None
                     # Stock handling
                     if color_id:
