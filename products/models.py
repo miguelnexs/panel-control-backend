@@ -27,7 +27,7 @@ class Product(models.Model):
     unit_measure = models.CharField(max_length=10, default='94', help_text="Código de unidad (94=Unidad, KGM=Kilogramo)")
     
     tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
         return self.name
@@ -40,7 +40,7 @@ class Category(models.Model):
     active = models.BooleanField(default=True)
     position = models.PositiveIntegerField(default=0)
     tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     def __str__(self):
         return self.name

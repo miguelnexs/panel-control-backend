@@ -18,7 +18,7 @@ class Sale(models.Model):
     order_number = models.CharField(max_length=32, unique=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     payment_id = models.CharField(max_length=100, blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
 
 
@@ -38,4 +38,4 @@ class OrderNotification(models.Model):
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE)
     tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
     read = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)

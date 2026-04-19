@@ -281,7 +281,7 @@ class SaleView(APIView):
 
 
 class SalesPagination(PageNumberPagination):
-    page_size = 10
+    page_size = 30
     page_size_query_param = 'page_size'
 
 
@@ -291,7 +291,13 @@ class SalesListView(ListAPIView):
 
     def get_queryset(self):
         tenant = _get_user_tenant(self.request.user)
-        qs = Sale.objects.all().select_related('client').prefetch_related('items')
+        # Optimized with prefetch_related to load items and their relationships in bulk
+        qs = Sale.objects.all().select_related('client').prefetch_related(
+            'items__product', 
+            'items__color', 
+            'items__variant',
+            'items__product__category'
+        )
         if tenant:
             qs = qs.filter(tenant=tenant)
         status = self.request.query_params.get('status')

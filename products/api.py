@@ -174,6 +174,40 @@ class ProductSerializer(serializers.ModelSerializer):
         data['skus'] = skus_data
         return data
 
+
+class ProductListSerializer(serializers.ModelSerializer):
+    """
+    Minimal serializer for listing products. 
+    Removes heavy gallery, colors, and variant processing.
+    """
+    category_name = serializers.ReadOnlyField(source='category.name')
+    total_stock = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'name', 'price', 'category', 'category_name', 'sku', 
+            'image', 'active', 'is_draft', 'position', 'created_at',
+            'is_sale', 'sale_price', 'inventory_qty', 'total_stock'
+        ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        img = data.get('image')
+        if request and img and isinstance(img, str) and img.startswith('/'):
+            data['image'] = request.build_absolute_uri(img)
+            
+        # Optimization: We use the already annotated total_stock or fall back
+        t_stock = getattr(instance, 'total_stock_annotated', None)
+        if t_stock is None:
+            # Fallback if not annotated
+            t_stock = instance.inventory_qty or 0
+            # Simple sum of SKU stocks if we really need it, but ideally we annotate
+            # For now, let's keep it very fast
+        data['total_stock'] = t_stock
+        return data
+
     def validate(self, attrs):
         is_draft = attrs.get('is_draft', False) or (self.instance and self.instance.is_draft)
         
@@ -221,10 +255,21 @@ def _get_user_role(user):
         return 'employee'
 
 
+class ProductPagination(PageNumberPagination):
+    page_size = 30
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
 class ProductListCreateView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class = ProductSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+    pagination_class = ProductPagination
+
+    def get_serializer_class(self):
+        if self.request.method == 'GET':
+            return ProductListSerializer
+        return ProductSerializer
 
     def get_queryset(self):
         tenant = _get_user_tenant(self.request.user)
@@ -237,13 +282,49 @@ class ProductListCreateView(ListCreateAPIView):
             else:
                 return Product.objects.none()
         
+        from django.db.models import Sum, Q, OuterRef, Subquery
+        from django.db.models.functions import Coalesce
+        from .models import ProductSKU
+
+        # High-performance stock calculation using Subquery instead of JOIN + GROUP BY
+        skus_sum = ProductSKU.objects.filter(product=OuterRef('pk')).values('product').annotate(total=Sum('stock')).values('total')
+        
+        # Optimize with select_related for category and the fast stock subquery
+        qs = qs.select_related('category').annotate(
+            total_stock_annotated=Coalesce(Subquery(skus_sum), 0)
+        )
+        
         ordering = self.request.query_params.get('ordering')
         if ordering:
             allowed = {'name', 'created_at', 'price', 'position', 'active'}
             if ordering.lstrip('-') in allowed:
-                return qs.order_by(ordering)
-        
-        return qs.order_by('-created_at')
+                qs = qs.order_by(ordering)
+            else:
+                qs = qs.order_by('-created_at')
+        else:
+            qs = qs.order_by('-created_at')
+            
+        search = self.request.query_params.get('search')
+        if search:
+            # Import Q at the file level, it's already there (from django.db.models import Q)
+            qs = qs.filter(
+                Q(name__icontains=search) | 
+                Q(sku__icontains=search) | 
+                Q(description__icontains=search)
+            )
+            
+        active_str = self.request.query_params.get('active')
+        if active_str:
+            if active_str.lower() in ['true', '1', 't']:
+                qs = qs.filter(active=True)
+            elif active_str.lower() in ['false', '0', 'f']:
+                qs = qs.filter(active=False)
+                
+        category_id = self.request.query_params.get('category')
+        if category_id:
+            qs = qs.filter(category_id=category_id)
+            
+        return qs
 
     def perform_create(self, serializer):
         tenant = _get_user_tenant(self.request.user)
